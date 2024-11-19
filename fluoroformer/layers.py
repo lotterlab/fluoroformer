@@ -60,6 +60,31 @@ class NLLSurvLoss(nn.Module):
 
 
 class PatchAttention(nn.Module):
+    """
+    Implements attention pooling for patch embeddings, following the Attention-Based
+    Multiple Instance Learning (ABMIL) mechanism.
+
+    Parameters
+    ----------
+    input_dim : int
+        The dimensionality of the input feature vectors.
+    hidden_dim : int
+        The dimensionality of the hidden attention vectors (u and v).
+    dropout : float, optional
+        Dropout probability applied after the linear transformation. Default is 0.1.
+
+    Methods
+    -------
+    forward(x)
+        Applies the attention mechanism and pools the patch embeddings.
+
+    Notes
+    -----
+    - Attention weights are computed as the product of the hyperbolic tangent of v
+      and the sigmoid of u, passed through a softmax function.
+    - The final feature vector is computed as a weighted sum of the input embeddings
+      using the attention weights.
+    """
     def __init__(self, input_dim, hidden_dim, dropout=0.1):
         super().__init__()
         self.lin_uv = nn.Linear(input_dim, 2 * hidden_dim)
@@ -85,6 +110,26 @@ class PatchAttention(nn.Module):
 
 
 class SDPA(nn.Module):
+    """
+    Implements Scaled Dot-Product Attention (SDPA) for self-attention mechanisms.
+
+    Parameters
+    ----------
+    hidden_dim : int
+        The dimensionality of the input and output feature vectors.
+
+    Methods
+    -------
+    forward(x)
+        Computes the attention scores and applies them to the value vectors.
+
+    Notes
+    -----
+    - This implementation includes the computation of query, key, and value vectors
+      through a single linear transformation.
+    - Attention scores are scaled by the square root of the hidden dimension to
+      stabilize gradients.
+    """
     def __init__(self, hidden_dim):
         super().__init__()
         self.qkv = nn.Linear(hidden_dim, 3 * hidden_dim)
@@ -102,6 +147,38 @@ class SDPA(nn.Module):
 
 
 class MarkerAttention(nn.Module):
+    """
+    Implements marker-level attention to fuse information across multiplexed marker
+    channels for multi-channel image data.
+
+    This module performs co-attention between marker channels, processes the embeddings
+    through a bottleneck, applies skip connections, and normalizes the outputs. The
+    final output is a fused embedding for each patch with pooled information from the
+    marker dimension.
+
+    Parameters
+    ----------
+    embedding_dim : int
+        The dimensionality of the input embeddings for each marker.
+    hidden_dim : int
+        The dimensionality of the intermediate embeddings after the bottleneck.
+    num_heads : int, optional
+        Number of attention heads. Default is 1.
+    dropout : float, optional
+        Dropout probability applied during the forward pass. Default is 0.1.
+
+    Methods
+    -------
+    forward(x)
+        Computes fused patch embeddings by applying marker-level co-attention.
+
+    Notes
+    -----
+    - This module operates on input tensors where the marker dimension is explicitly
+      represented, making it suitable for multiplexed imaging data.
+    - Skip connections and layer normalization ensure stable training and preserve
+      information from the input features.
+    """
     def __init__(self, embedding_dim, hidden_dim, num_heads=1, dropout=0.1):
         super(MarkerAttention, self).__init__()
         self.lin_down = nn.Linear(embedding_dim, hidden_dim)
@@ -128,7 +205,7 @@ class MarkerAttention(nn.Module):
 
         # First skip and normalize
         x = x + skip1
-        # x = self.norm1(x)
+        x = self.norm1(x)
 
         # Undo bottleneck
         x = self.lin_up(x)
@@ -136,7 +213,7 @@ class MarkerAttention(nn.Module):
 
         # Second skip and normalize
         x = x + skip2
-        # x = self.norm2(x)
+        x = self.norm2(x)
 
         # Reshape to input dims
         x = einops.rearrange(x, "(b p) m e -> b p m e", b=b, p=p)
