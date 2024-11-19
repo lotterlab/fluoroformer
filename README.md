@@ -1,5 +1,6 @@
 # Fluoroformer
 [![arXiv](https://img.shields.io/badge/arXiv-2411.08975-B31B1B.svg)](https://arxiv.org/abs/2411.08975)
+
 Official implementation of the Fluoroformer module from **[Fluoroformer: Scaling multiple instance learning to multiplexed images via attention-based channel fusion](https://arxiv.org/abs/2411.08975)**.
 
 # Core modules and training scripts
@@ -42,4 +43,4 @@ config_path
 ```
 Note that `emb.pt` is expected to consist of a triple `(emb, time_, deceased)`, where `emb` is the output of the embedding script, `time_` is a scalar corresponding to the follow-up time, and `deceased` is Boolean indicating survival status.
 
-The `train`, `val`, and `test` splits should be located in a yaml file that is passed to to the `EmbeddedDataModule` class. See the corresponding docstring for more detail.
+The `train`, `val`, and `test` splits should be located in a YAML file that is passed to to the `EmbeddedDataModule` class. See the corresponding docstring for more detail.
