@@ -1,106 +1,57 @@
 from typing import *
-import os
 from math import ceil
-from pathlib import Path
 
-import pandas as pd
 import numpy as np
 from tqdm import tqdm
-
-import tifffile
 from skimage.transform import downscale_local_mean
 from skimage import filters
-
-import xmltodict
-import xml.etree.ElementTree as ET
-
-import timm
-from timm.data import resolve_data_config
-from timm.data.transforms_factory import create_transform
-from huggingface_hub import login
-
 import einops
 import torch
-from torchvision import transforms
-from torchvision.transforms.v2 import *
-from torchvision.models import resnet50, ResNet50_Weights
-from torch import nn
 
-MARKERS = ['DAPI', 'FOXP3', 'Cytokeratin', 'CD8', 'PD-1', 'PD-L1', 'Autofluorescence', 'ROI']
-
-class HeadlessResNet50(nn.Module):
-    def __init__(self, pretrained=True):
-        super().__init__()
-        self.resnet = resnet50(weights=ResNet50_Weights.DEFAULT if pretrained else None)
-        self.resnet = nn.Sequential(*list(self.resnet.children())[:-1])
-
-    def forward(self, x):
-        x = self.resnet(x)
-        x = torch.flatten(x, 1)
-        return x
-
-def crop(im: np.array, patch_size: int):
-    # compute number of patches
-    height, width, _ = im.shape
-    n_patches_h = height // patch_size
-    n_patches_w = width // patch_size
-
-    # crop to be evenly divisible by patch_size
-    height_crop = patch_size * n_patches_h
-    width_crop = patch_size * n_patches_w
-    im = im[:height_crop, :width_crop, :]
-
-    return im, n_patches_h, n_patches_w
+from .utils import *
 
 
 def segment(thumb: np.array):
-    # masks for all markers
+    """
+    Segments the foreground of a multiplexed image by combining masks for all markers.
+
+    Parameters
+    ----------
+    thumb : np.array
+        The input multiplexed image as a NumPy array of shape (H, W, M), where H is
+        the height, W is the width, and M is the number of markers.
+
+    Returns
+    -------
+    fore_mask : np.array
+        A binary mask of shape (H, W), where `True` indicates foreground pixels
+        and `False` indicates background pixels. Pixels identified as hard
+        background in any marker are excluded from the foreground mask.
+
+    """
+    # Masks for all markers
     fore_mask = 0
     hard_mask = 0
 
-    # chunk along marker dimension
+    # Chunk along marker dimension
     ims = np.split(thumb, thumb.shape[-1], axis=-1)
 
     for im in ims:
-        # get hard background and foreground
+        # Get hard background and foreground
         hard_mask_cur = im == 0
         fore_mask_cur = im > filters.threshold_otsu(im[~hard_mask_cur])
 
-        # update global masks
+        # Update global masks
         fore_mask += fore_mask_cur
         hard_mask += hard_mask_cur
 
-    # pixel is foreground if foreground in any one marker
+    # Pixel is foreground if foreground in any one marker
     fore_mask = fore_mask > 0
 
-    # pixel is hard background if hard background in any one marker
+    # Pixel is hard background if hard background in any one marker
     fore_mask[hard_mask > 0] = False
 
     return fore_mask
-
-
-def patchify(
-    im: np.array, mask: np.array, patch_size: int, n_patches_h: int, n_patches_w: int
-):
-    patches = []
-    for i in range(n_patches_h):
-        for j in range(n_patches_w):
-            # get image indices
-            start_i = i * patch_size
-            end_i = start_i + patch_size
-            start_j = j * patch_size
-            end_j = start_j + patch_size
-
-            # get patch
-            patch = im[start_i:end_i, start_j:end_j, :]
-
-            # append if in foreground
-            if mask[i, j]:
-                patches.append(patch)
-
-    patches = np.stack(patches)
-
-    return patches
 
 
 def embed(
@@ -111,55 +62,92 @@ def embed(
     batch_size: int = 64,
     verbose: bool = True,
 ) -> torch.Tensor:
+    """
+    Embeds a batch of image patches using a deep learning model and preprocessing pipeline.
+
+    Parameters
+    ----------
+    patches : np.array
+        A NumPy array of shape (N, H, W, M), where N is the number of patches,
+        H and W are the height and width of each patch, and M is the number of markers.
+    model : torch.nn.Module
+        A PyTorch model used to compute the embeddings.
+    transform : torch.nn.Module
+        A preprocessing transformation to apply to the image patches before
+        passing them to the model.
+    device : torch.device
+        The device (CPU or GPU) on which to perform the computations.
+    batch_size : int, optional
+        The number of patches to process in each batch. Default is 64.
+    verbose : bool, optional
+        Whether to display a progress bar during the embedding process. Default is True.
+
+    Returns
+    -------
+    opt_embs : torch.Tensor
+        A tensor of shape (N, M, E), where E is the embedding size produced by the model
+        for each marker in each patch.
+
+    Notes
+    -----
+    - The function normalizes the input patches to a [0, 1] range by dividing by 255.0.
+    - Autofluorescence is subtracted from each marker channel (except the last one).
+    - The markers are flattened, expanded into a pseudo-RGB format, and transformed before
+      being passed to the model.
+    - The embeddings for each patch are restructured back into the original patch/marker layout.
+    - The function ensures memory efficiency by processing the patches in batches and using
+      PyTorch's `no_grad` context to disable gradient computation.
+
+    """
     num_batches = ceil(len(patches) / batch_size)
     opt_embs = []
 
     for batch_idx in tqdm(range(num_batches), disable=not verbose):
-        # slice batch
+        # Slice batch
         start = batch_idx * batch_size
         end = min(start + batch_size, len(patches))
         batch_np = patches[start:end]
 
-        # copy to device, flip channels, normal to [0, 1]
+        # Copy to device, flip channels, normal to [0, 1]
         batch = torch.from_numpy(batch_np).to(device).float() / 255.0
 
-        # rearrange markers
+        # Rearrange markers
         b, h, w, m = batch.shape
         batch = einops.rearrange(batch, "b h w m -> b m h w")
 
-        # subtract autofluorescence and clip back to [0, 1]
+        # Subtract autofluorescence and clip back to [0, 1]
         auto = batch[:, -1, ...].unsqueeze(1)
         batch[:, :-1, ...] -= auto
         batch = batch.clip(0, 1)
 
-        # flatten along marker dimension
+        # Flatten along marker dimension
         batch = einops.rearrange(batch, "b m h w -> (b m) h w")
 
-        # expand to be of shape (b m) c h w
+        # Expand to be of shape (b m) c h w
         batch = batch.unsqueeze(1)
         batch = batch.repeat_interleave(3, dim=1)
 
-        # use model transform
+        # Use model transform
         batch = transform(batch)
 
-        # call model
+        # Call model
         with torch.no_grad():
             batch_emb = model(batch)
 
-        # unflatten along marker dimension
+        # Unflatten along marker dimension
         batch_emb = einops.rearrange(batch_emb, "(b m) e -> b m e", b=b, m=m)
 
-        # copy to host and append
+        # Copy to host and append
         opt_embs.append(batch_emb.cpu())
 
-    # stack to contiguous array
+    # Stack to contiguous array
     opt_embs = torch.cat(opt_embs, dim=0)
 
     return opt_embs
 
 
 def process_mif(
-    ipt_path: Path,
+    im: np.array,
     model: torch.nn.Module,
     transform: torch.nn.Module,
     device: torch.device,
@@ -167,28 +155,69 @@ def process_mif(
     patch_size: int = 224,
     verbose: bool = True,
 ) -> Tuple[torch.Tensor, np.array, np.array]:
-    with tifffile.TiffFile(ipt_path) as tif:
-        data = xmltodict.parse(tif.pages[0].description)
-        names_wsi = [d["@Name"] for d in data["OME"]["Image"]["Pixels"]["Channel"]]
-        assert names_wsi == MARKERS
-        im = tif.asarray()
+    """
+    Processes a multiplexed image file (MIF) by cropping, downsampling, segmenting,
+    and embedding the image using a deep learning model.
 
-    # transpose to put markers last
+    Parameters
+    ----------
+    im : np.array
+        The input multiplexed image as a NumPy array of shape (M, H, W), where M
+        is the number of markers, H is the height, and W is the width.
+    model : torch.nn.Module
+        A PyTorch model used to compute the embeddings of the image patches.
+    transform : torch.nn.Module
+        A preprocessing transformation to apply to the image patches before
+        passing them to the model.
+    device : torch.device
+        The device (CPU or GPU) on which to perform the computations.
+    batch_size : int, optional
+        The number of patches to process in each batch. Default is 64.
+    patch_size : int, optional
+        The size of the square patches (in pixels) used during patch extraction.
+        Default is 224.
+    verbose : bool, optional
+        Whether to display progress during the embedding process. Default is True.
+
+    Returns
+    -------
+    thumb : np.array
+        A downsampled thumbnail of the cropped image with shape
+        (H', W', M), where H' and W' are the downscaled dimensions and M
+        is the number of markers.
+    mask : np.array
+        A binary segmentation mask of shape (H', W'), where `True` indicates
+        foreground pixels and `False` indicates background pixels.
+    emb : torch.Tensor
+        A tensor of shape (N, M, E), where N is the number of foreground patches,
+        M is the number of markers, and E is the embedding size produced by the model.
+
+    Notes
+    -----
+    - The input image is transposed to have markers as the last dimension.
+    - The image is cropped to ensure its dimensions are evenly divisible by `patch_size`.
+    - A downsampled thumbnail is created using local mean pooling.
+    - Foreground segmentation is performed using marker-specific thresholds.
+    - Only patches marked as foreground in the mask are embedded.
+    - The function asserts that the number of embeddings matches the number of foreground patches.
+
+    """
+    # Transpose to put markers last
     im = np.transpose(im, (1, 2, 0))
     im = im[..., :7]
 
     im_crop, n_patches_h, n_patches_w = crop(im, patch_size)
 
-    # downsample down to patch_size
+    # Downsample down to patch_size
     thumb = downscale_local_mean(im_crop, (patch_size, patch_size, 1))
 
-    # segment image
+    # Segment image
     mask = segment(thumb)
 
-    # patchify using mask
+    # Patchify using mask
     patches = patchify(im, mask, patch_size, n_patches_h, n_patches_w)
 
-    # embed
+    # Embed
     emb = embed(
         patches=patches,
         model=model,

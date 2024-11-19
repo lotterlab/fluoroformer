@@ -1,98 +1,36 @@
 from typing import *
-import os
 from math import ceil
-from pathlib import Path
 
-import pandas as pd
 import numpy as np
 from tqdm import tqdm
-
-import tifffile
 from skimage.transform import downscale_local_mean
 from skimage import filters, color
-
-import xmltodict
-import xml.etree.ElementTree as ET
-
-import timm
-from timm.data import resolve_data_config
-from timm.data.transforms_factory import create_transform
-from huggingface_hub import login
-
 import einops
 import torch
-from torchvision import transforms
-from torchvision.transforms.v2 import *
-from torchvision.models import resnet50, ResNet50_Weights
-from torch import nn
 
-MARKERS = [
-    "DAPI",
-    "FOXP3",
-    "Cytokeratin",
-    "CD8",
-    "PD-1",
-    "PD-L1",
-    "Autofluorescence",
-    "ROI",
-]
-
-
-class HeadlessResNet50(nn.Module):
-    def __init__(self, pretrained=True):
-        super().__init__()
-        self.resnet = resnet50(weights=ResNet50_Weights.DEFAULT if pretrained else None)
-        self.resnet = nn.Sequential(*list(self.resnet.children())[:-1])
-
-    def forward(self, x):
-        x = self.resnet(x)
-        x = torch.flatten(x, 1)
-        return x
-
-
-def crop(im: np.array, patch_size: int):
-    # Compute number of patches
-    height, width, _ = im.shape
-    n_patches_h = height // patch_size
-    n_patches_w = width // patch_size
-
-    # Crop to be evenly divisible by patch_size
-    height_crop = patch_size * n_patches_h
-    width_crop = patch_size * n_patches_w
-    im = im[:height_crop, :width_crop, :]
-
-    return im, n_patches_h, n_patches_w
+from .utils import *
 
 
 def segment(thumb: np.array):
+    """
+    Segments the foreground of an H&E thumbnail image using Otsu's thresholding.
+
+    Parameters
+    ----------
+    thumb : np.array
+        The input thumbnail image as a NumPy array of shape (H, W, C), where C is the
+        number of color channels.
+
+    Returns
+    -------
+    mask : np.array
+        A binary mask of shape (H, W), where `True` indicates foreground and `False`
+        indicates background.
+    """
     im_gray = color.rgb2gray(thumb)
     thres = filters.threshold_otsu(im_gray)
     mask = im_gray < thres
     return mask
-
-
-def patchify(
-    im: np.array, mask: np.array, patch_size: int, n_patches_h: int, n_patches_w: int
-):
-    patches = []
-    for i in range(n_patches_h):
-        for j in range(n_patches_w):
-            # Get image indices
-            start_i = i * patch_size
-            end_i = start_i + patch_size
-            start_j = j * patch_size
-            end_j = start_j + patch_size
-
-            # Get patch
-            patch = im[start_i:end_i, start_j:end_j, :]
-
-            # Append if in foreground
-            if mask[i, j]:
-                patches.append(patch)
-
-    patches = np.stack(patches)
-
-    return patches
 
 
 def embed(
@@ -103,6 +41,32 @@ def embed(
     batch_size: int = 64,
     verbose: bool = True,
 ) -> torch.Tensor:
+    """
+    Computes embeddings for patches from an H&E image using a deep learning model.
+
+    Parameters
+    ----------
+    patches : np.array
+        A NumPy array of shape (N, H, W, C), where N is the number of patches,
+        H and W are the height and width of each patch, and C is the number of channels.
+    model : torch.nn.Module
+        A PyTorch model used to compute the embeddings.
+    transform : torch.nn.Module
+        A preprocessing transformation to apply to the image patches before passing
+        them to the model.
+    device : torch.device
+        The device (CPU or GPU) on which to perform the computations.
+    batch_size : int, optional
+        The number of patches to process in each batch. Default is 64.
+    verbose : bool, optional
+        Whether to display a progress bar during embedding. Default is True.
+
+    Returns
+    -------
+    opt_embs : torch.Tensor
+        A tensor of shape (N, E), where E is the embedding size produced by the model
+        for each patch.
+    """
     num_batches = ceil(len(patches) / batch_size)
     opt_embs = []
 
@@ -130,13 +94,13 @@ def embed(
         opt_embs.append(batch_emb.cpu())
 
     # Stack to contiguous array
-    opt_embs = torch.cat(opt_embs, dim=0) # b e
+    opt_embs = torch.cat(opt_embs, dim=0)  # b e
 
     return opt_embs
 
 
 def process_hne(
-    ipt_path: Path,
+    im: np.ndarray,
     model: torch.nn.Module,
     transform: torch.nn.Module,
     device: torch.device,
@@ -144,10 +108,55 @@ def process_hne(
     patch_size: int = 224,
     verbose: bool = True,
 ) -> Tuple[torch.Tensor, np.array, np.array]:
+    """
+    Processes an H&E image by cropping, downsampling, segmenting, and embedding
+    image patches using a deep learning model.
 
-    with tifffile.TiffFile(ipt_path) as tif:
-        im = tif.asarray()
+    Parameters
+    ----------
+    im : np.ndarray
+        The input H&E image as a NumPy array of shape (H, W, C), where H is the height,
+        W is the width, and C is the number of color channels.
+    model : torch.nn.Module
+        A PyTorch model used to compute the embeddings of the image patches.
+    transform : torch.nn.Module
+        A preprocessing transformation to apply to the image patches before passing
+        them to the model.
+    device : torch.device
+        The device (CPU or GPU) on which to perform the computations.
+    batch_size : int, optional
+        The number of patches to process in each batch. Default is 64.
+    patch_size : int, optional
+        The size of the square patches (in pixels) used during patch extraction.
+        Default is 224.
+    verbose : bool, optional
+        Whether to display progress during the embedding process. Default is True.
 
+    Returns
+    -------
+    thumb : np.array
+        A downsampled thumbnail of the cropped image with shape
+        (H', W', C), where H' and W' are the downscaled dimensions, and C is the
+        number of color channels.
+    mask : np.array
+        A binary segmentation mask of shape (H', W'), where `True` indicates
+        foreground pixels and `False` indicates background pixels.
+    emb : torch.Tensor
+        A tensor of shape (N, E), where N is the number of foreground patches, and
+        E is the embedding size produced by the model.
+
+    Notes
+    -----
+    - The function ensures that the image dimensions are evenly divisible by `patch_size`
+      by cropping the image.
+    - The thumbnail is created by downsampling the cropped image using local mean pooling.
+    - Foreground segmentation is performed using Otsu's thresholding on the grayscale
+      version of the thumbnail.
+    - Patches marked as foreground by the segmentation mask are extracted and embedded
+      using the provided model and transformation pipeline.
+    - Assertions verify that the number of embeddings matches the foreground patches
+      identified by the mask and that the mask dimensions match the thumbnail's spatial dimensions.
+    """
     # Crop to make evenly divisible by 224
     im_crop, n_patches_h, n_patches_w = crop(im, patch_size)
 
