@@ -23,7 +23,7 @@ See the original manuscript for more details.
 
 # Data loading
 
-The [data module](https://lightning.ai/docs/pytorch/stable/data/datamodule.html) is located at `fluoroformer/data.py`. It expects a path to a directory `config_path` structured as follows:
+The [data module](https://lightning.ai/docs/pytorch/stable/data/datamodule.html) is implemented by the `EmbeddedDataModule` class in `fluoroformer/data.py`. It expects a path to a directory `config_path` structured as follows:
 ```bash
 config_path
 ├── SLIDE_1
@@ -41,3 +41,5 @@ config_path
     └── emb.pt
 ```
 Note that `emb.pt` is expected to consist of a triple `(emb, time_, deceased)`, where `emb` is the output of the embedding script, `time_` is a scalar corresponding to the follow-up time, and `deceased` is Boolean indicating survival status.
+
+The `train`, `val`, and `test` splits should be located in a yaml file that is passed to to the `EmbeddedDataModule` class. See the corresponding docstring for more detail.
