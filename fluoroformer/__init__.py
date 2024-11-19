@@ -1,2 +1,2 @@
-from train.data import *
-from train.learner import *
+from fluoroformer.data import *
+from fluoroformer.learner import *

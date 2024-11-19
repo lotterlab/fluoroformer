@@ -1,7 +1,7 @@
 import signal
 import traceback
 import sys
-from train import Learner, EmbeddedDataModule
+from fluoroformer import Learner, EmbeddedDataModule
 from pytorch_lightning.cli import LightningCLI
 
 def main():
