@@ -5,8 +5,7 @@ Official implementation of the Fluoroformer module from **[Fluoroformer: Scaling
 
 # Core modules and training scripts
 
-The Fluoroformer module itself, along with the basic multiple instance learning (MIL) modules, are implemented in PyTorch and located in `fluoroformer/layers.py`, while the training loop is performed by the [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/) and located in `fluoroformer/learner.py`: 
-Executing the training and evaluation loops is performed via the [Lightning Command-Line Interface (CLI)](https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_intermediate.html) as follows:
+The Fluoroformer module itself, along with the basic multiple instance learning (MIL) modules, are implemented in PyTorch and located in `fluoroformer/layers.py`, while the training loop is performed by the [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/) and located in `fluoroformer/learner.py`. Executing the training and evaluation loops is performed via the [Lightning Command-Line Interface (CLI)](https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_intermediate.html) as follows:
 ```bash
 python -m fluoroformer --help
 ```
